@@ -69,6 +69,7 @@ jobs:
           MIN_SUCCESS_RATIO: '0'
           MAX_RESIDENTIAL_PER_COUNTRY: '8'
           MAX_DATACENTER_PER_COUNTRY: '0'
+          COUNTRY_RESIDENTIAL_CAPS: 'KR:3,US:5'
         run: python vpngate.py
 
       - name: Ensure GitHub Pages is enabled
