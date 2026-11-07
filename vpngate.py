@@ -24,7 +24,7 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import quote, urlsplit
@@ -163,6 +163,33 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
     return value
 
 
+def _env_country_caps(name: str) -> dict[str, int]:
+    """解析分国住宅上限覆盖，格式：KR:3,US:5（ISO 国家代码:上限）。
+
+    未列出的国家继续用 MAX_RESIDENTIAL_PER_COUNTRY 的统一上限。
+    """
+    raw = os.environ.get(name, "").strip()
+    caps: dict[str, int] = {}
+    if not raw:
+        return caps
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        code, sep, value = part.partition(":")
+        code = code.strip().upper()
+        if not sep or len(code) != 2 or not code.isalpha():
+            raise ConfigError(f"{name} 格式应为 国家代码:上限（如 KR:3,US:5），当前项：{part!r}")
+        try:
+            cap = int(value.strip())
+        except ValueError:
+            raise ConfigError(f"{name} 的上限需要是整数，当前项：{part!r}") from None
+        if cap < 0:
+            raise ConfigError(f"{name} 的上限不能为负，当前项：{part!r}")
+        caps[code] = cap
+    return caps
+
+
 def normalize_worker_base(raw: str) -> str:
     """把 CHECK_WORKER / DOMAIN 归一化成以 `sstp=vpn:vpn@` 结尾的检测地址前缀。
 
@@ -289,6 +316,7 @@ class Config:
     min_success_ratio: float
     max_residential_per_country: int
     max_datacenter_per_country: int
+    country_residential_caps: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def load(cls) -> "Config":
@@ -323,6 +351,7 @@ class Config:
             min_success_ratio=_env_float("MIN_SUCCESS_RATIO", 0.0, minimum=0.0),
             max_residential_per_country=_env_int("MAX_RESIDENTIAL_PER_COUNTRY", 20),
             max_datacenter_per_country=_env_int("MAX_DATACENTER_PER_COUNTRY", 10),
+            country_residential_caps=_env_country_caps("COUNTRY_RESIDENTIAL_CAPS"),
         )
 
 
@@ -843,7 +872,8 @@ def build_nodes_text(data: dict[str, Any], edge_hosts: list[str], cfg: Config) -
         )
         residential = [n for n in nodes if n.get("residential") == "residential"]
         others = [n for n in nodes if n.get("residential") != "residential"]
-        chosen = residential[: cfg.max_residential_per_country] + others[: cfg.max_datacenter_per_country]
+        residential_cap = cfg.country_residential_caps.get(code, cfg.max_residential_per_country)
+        chosen = residential[:residential_cap] + others[: cfg.max_datacenter_per_country]
         counters = {"residential": 0, "datacenter": 0, "unknown": 0}
         for node in chosen:
             link = f"sstp://vpn:vpn@{node['host']}:{node['port']}"
@@ -936,6 +966,8 @@ def main() -> None:
     session = make_session(pool_size=cfg.concurrency)
     log("CONFIG", f"检测地址: {cfg.worker_base.rsplit('?', 1)[0]}?sstp=***")
     log("CONFIG", f"并发 {cfg.concurrency}, 单节点超时 {cfg.check_timeout}s, 整体截止 {cfg.deadline_s}s")
+    if cfg.country_residential_caps:
+        log("CONFIG", f"分国住宅上限覆盖: {cfg.country_residential_caps}（其余国家上限 {cfg.max_residential_per_country}）")
 
     rows, source = fetch_vpngate(cfg, session)
     raw_count = len(rows)
